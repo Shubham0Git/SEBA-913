@@ -30,6 +30,7 @@ import (
 	"github.com/opencord/bbsim/internal/bbsim/packetHandlers"
 	"github.com/opencord/bbsim/internal/bbsim/responders/dhcp"
 	"github.com/opencord/bbsim/internal/bbsim/responders/eapol"
+	"github.com/opencord/bbsim/internal/bbsim/responders/igmp"
 	"github.com/opencord/bbsim/internal/common"
 	omcilib "github.com/opencord/bbsim/internal/common/omci"
 	omcisim "github.com/opencord/omci-sim"
@@ -138,6 +139,11 @@ func CreateONU(olt *OltDevice, pon PonPort, id uint32, sTag int, cTag int, auth 
 			// TODO add start OMCI state
 			{Name: "send_eapol_flow", Src: []string{"initialized"}, Dst: "eapol_flow_sent"},
 			{Name: "send_dhcp_flow", Src: []string{"eapol_flow_sent"}, Dst: "dhcp_flow_sent"},
+			// IGMP
+			{Name: "igmp_join_start", Src: []string{"eap_response_success_received", "gem_port_added", "eapol_flow_received"}, Dst: "igmp_join_start"},
+			{Name: "igmp_join_done", Src: []string{"igmp_join_start"}, Dst: "igmp_join_done"},
+			{Name: "igmp_join_error", Src: []string{"igmp_join_start"}, Dst: "igmp_join_error"},
+			{Name: "igmp_leave", Src: []string{"igmp_join_start"}, Dst: "igmp_left"},
 		},
 		fsm.Callbacks{
 			"enter_state": func(e *fsm.Event) {
@@ -237,6 +243,17 @@ func CreateONU(olt *OltDevice, pon PonPort, id uint32, sTag int, cTag int, auth 
 				}
 				o.Channel <- msg
 			},
+			"igmp_join_start": func(e *fsm.Event) {
+				msg := Message{
+					Type: IGMPMembershipReportV2,
+				}
+				o.Channel <- msg
+			},
+			"igmp_leave": func(e *fsm.Event) {
+				msg := Message{
+					Type: IGMPLeaveGroup}
+				o.Channel <- msg
+			},
 		},
 	)
 
@@ -320,7 +337,10 @@ loop:
 					// NOTE here we receive packets going from the DHCP Server to the ONU
 					// for now we expect them to be double-tagged, but ideally the should be single tagged
 					dhcp.HandleNextPacket(o.ID, o.PonPortID, o.Sn(), o.PortNo, o.HwAddress, o.CTag, o.InternalState, msg.Packet, stream)
-				}
+				} else if msg.Type == packetHandlers.IGMP {
+                                        log.Info("---IGMP Recieved in OnuPacketOut----")
+                                        igmp.HandleNextPacket(msg.OnuId, msg.IntfId, o.Sn(), o.PortNo, o.InternalState, msg.Packet, stream, client)
+                                }
 			case OnuPacketIn:
 				// NOTE we only receive BBR packets here.
 				// Eapol.HandleNextPacket can handle both BBSim and BBr cases so the call is the same
@@ -337,7 +357,10 @@ loop:
 					eapol.HandleNextPacket(msg.OnuId, msg.IntfId, o.Sn(), o.PortNo, o.InternalState, msg.Packet, stream, client)
 				} else if msg.Type == packetHandlers.DHCP {
 					dhcp.HandleNextBbrPacket(o.ID, o.PonPortID, o.Sn(), o.STag, o.HwAddress, o.DoneChannel, msg.Packet, client)
-				}
+				} else if msg.Type == packetHandlers.IGMP {
+                                        log.Info("---IGMP Recieved in OnuPacketIn----")
+                                        igmp.HandleNextPacket(msg.OnuId, msg.IntfId, o.Sn(), o.PortNo, o.InternalState, msg.Packet, stream, client)
+                                }
 			case DyingGaspIndication:
 				msg, _ := message.Data.(DyingGaspIndicationMessage)
 				o.sendDyingGaspInd(msg, stream)
@@ -348,6 +371,12 @@ loop:
 				o.sendEapolFlow(client)
 			case SendDhcpFlow:
 				o.sendDhcpFlow(client)
+			case IGMPMembershipReportV2:
+				log.Infof("Recieved IGMPMembershipReportV2 message on ONU channel")
+				igmp.SendIGMPMembershipReportV2(o.PonPortID, o.ID, o.Sn(), o.PortNo, o.HwAddress, stream)
+			case IGMPLeaveGroup:
+				log.Infof("Recieved IGMPLeaveGroupV2 message on ONU channel")
+				igmp.SendIGMPLeaveGroupV2(o.PonPortID, o.ID, o.Sn(), o.PortNo, o.HwAddress, stream)
 			default:
 				onuLogger.Warnf("Received unknown message data %v for type %v in OLT Channel", message.Data, message.Type)
 			}
